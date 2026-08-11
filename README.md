@@ -12,3 +12,4 @@ D3 = PLACE       -> GND
 RX = LOOK DOWN   -> GND
 D0 = INVENTORY   -> 3.3V
 cannot craft will not add
+Must Have Esp8266 add on for Arduino And must have adafruitGFX pack and adafruit SSD1306 pack
