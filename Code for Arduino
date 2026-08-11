@@ -1,0 +1,2383 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <math.h>
+
+// =====================================================
+// MINECRAFT MICRO - ESP8266
+// =====================================================
+
+// =====================================================
+// OLED
+// =====================================================
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_ADDRESS 0x3C
+
+#define OLED_SCL D1
+#define OLED_SDA D2
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  OLED_RESET
+);
+
+
+// =====================================================
+// BUTTONS
+// =====================================================
+
+#define BTN_LEFT       D5
+#define BTN_RIGHT      D6
+#define BTN_JUMP       D7
+#define BTN_BREAK      D4
+#define BTN_PLACE      D3
+
+// RX = GPIO3
+#define BTN_LOOK_DOWN  3
+
+// D0 connects to 3.3V
+#define BTN_INVENTORY  D0
+
+
+// =====================================================
+// WORLD
+// =====================================================
+
+#define TILE_SIZE 8
+
+#define WORLD_W 96
+#define WORLD_H 12
+
+
+// =====================================================
+// BLOCK TYPES
+// =====================================================
+
+#define AIR          0
+#define GRASS        1
+#define DIRT         2
+#define STONE        3
+
+#define COAL_ORE     4
+#define IRON_ORE     5
+#define GOLD_ORE     6
+#define DIAMOND_ORE  7
+
+#define DOOR_CLOSED  8
+#define DOOR_OPEN    9
+
+
+uint8_t world[WORLD_H][WORLD_W];
+
+
+// =====================================================
+// INVENTORY
+// =====================================================
+//
+// AIR          = 0
+// GRASS        = 1
+// DIRT         = 2
+// STONE        = 3
+// COAL         = 4
+// IRON         = 5
+// GOLD         = 6
+// DIAMOND      = 7
+// DOOR         = 8
+//
+
+int inventory[9] = {
+
+  0,     // AIR
+
+  3,     // GRASS
+  10,    // DIRT
+  5,     // STONE
+
+  0,     // COAL ORE
+  0,     // IRON ORE
+  0,     // GOLD ORE
+  0,     // DIAMOND ORE
+
+  20     // DOORS
+};
+
+
+uint8_t selectedBlock = DIRT;
+
+
+// =====================================================
+// PLAYER
+// =====================================================
+
+float playerX = 40;
+float playerY = 20;
+
+float velocityX = 0;
+float velocityY = 0;
+
+const int PLAYER_W = 6;
+const int PLAYER_H = 7;
+
+int facing = 1;
+
+
+// =====================================================
+// CAMERA
+// =====================================================
+
+int cameraX = 0;
+
+// KEEP VERTICAL CAMERA FIXED
+
+int cameraY =
+  WORLD_H * TILE_SIZE -
+  SCREEN_HEIGHT;
+
+
+// =====================================================
+// BUTTON MEMORY
+// =====================================================
+
+bool prevJump = false;
+bool prevPlace = false;
+bool prevInventory = false;
+
+unsigned long lastPlaceTime = 0;
+unsigned long lastInventoryTime = 0;
+
+
+// =====================================================
+// MINING
+// =====================================================
+
+#define MINE_NONE    0
+#define MINE_FORWARD 1
+#define MINE_DOWN    2
+
+int miningMode = MINE_NONE;
+
+int miningX = -1;
+int miningY = -1;
+
+unsigned long miningStart = 0;
+
+
+// =====================================================
+// BLOCK BREAK TIMES
+// =====================================================
+
+unsigned long getBreakTime(uint8_t block) {
+
+  if (block == GRASS)
+    return 500;
+
+  if (block == DIRT)
+    return 700;
+
+  if (block == STONE)
+    return 1300;
+
+  if (block == COAL_ORE)
+    return 1500;
+
+  if (block == IRON_ORE)
+    return 1700;
+
+  if (block == GOLD_ORE)
+    return 1900;
+
+  if (block == DIAMOND_ORE)
+    return 2300;
+
+  if (
+    block == DOOR_CLOSED ||
+    block == DOOR_OPEN
+  )
+    return 400;
+
+  return 1000;
+}
+
+
+// =====================================================
+// GENERATE STONE / ORES
+// =====================================================
+//
+// Rough rarity:
+//
+// COAL      = common
+// IRON      = uncommon
+// GOLD      = rare
+// DIAMOND   = very rare
+//
+// =====================================================
+
+uint8_t generateStone(int depth) {
+
+  int roll =
+    random(0, 1000);
+
+
+  // -------------------------
+  // DIAMOND
+  // about 0.8%
+  // deeper only
+  // -------------------------
+
+  if (
+    depth >= 3 &&
+    roll < 8
+  ) {
+
+    return DIAMOND_ORE;
+  }
+
+
+  // -------------------------
+  // GOLD
+  // about 2.2%
+  // -------------------------
+
+  if (
+    depth >= 2 &&
+    roll < 30
+  ) {
+
+    return GOLD_ORE;
+  }
+
+
+  // -------------------------
+  // IRON
+  // about 6%
+  // -------------------------
+
+  if (roll < 90) {
+
+    return IRON_ORE;
+  }
+
+
+  // -------------------------
+  // COAL
+  // about 13%
+  // -------------------------
+
+  if (roll < 220) {
+
+    return COAL_ORE;
+  }
+
+
+  return STONE;
+}
+
+
+// =====================================================
+// GENERATE WORLD
+// =====================================================
+
+void generateWorld() {
+
+  for (int y = 0; y < WORLD_H; y++) {
+
+    for (int x = 0; x < WORLD_W; x++) {
+
+      world[y][x] = AIR;
+    }
+  }
+
+
+  int groundHeight = 8;
+
+
+  for (int x = 0; x < WORLD_W; x++) {
+
+    // Make hills
+
+    if (
+      random(0, 5) == 0
+    ) {
+
+      groundHeight +=
+        random(-1, 2);
+    }
+
+
+    groundHeight =
+      constrain(
+        groundHeight,
+        6,
+        9
+      );
+
+
+    for (
+      int y = groundHeight;
+      y < WORLD_H;
+      y++
+    ) {
+
+      int depth =
+        y - groundHeight;
+
+
+      // Surface
+
+      if (depth == 0) {
+
+        world[y][x] =
+          GRASS;
+      }
+
+
+      // Dirt
+
+      else if (depth <= 2) {
+
+        world[y][x] =
+          DIRT;
+      }
+
+
+      // Stone / ores
+
+      else {
+
+        world[y][x] =
+          generateStone(depth);
+      }
+    }
+  }
+
+
+  // ===================================================
+  // FLAT SPAWN AREA
+  // ===================================================
+
+  for (int x = 2; x < 12; x++) {
+
+    for (int y = 0; y < WORLD_H; y++) {
+
+      if (y < 8) {
+
+        world[y][x] =
+          AIR;
+      }
+
+      else if (y == 8) {
+
+        world[y][x] =
+          GRASS;
+      }
+
+      else if (y <= 10) {
+
+        world[y][x] =
+          DIRT;
+      }
+
+      else {
+
+        world[y][x] =
+          generateStone(4);
+      }
+    }
+  }
+
+
+  playerX =
+    5 * TILE_SIZE;
+
+
+  playerY =
+    8 * TILE_SIZE -
+    PLAYER_H;
+}
+
+
+// =====================================================
+// SOLID BLOCK CHECK
+// =====================================================
+
+bool solidBlock(
+  int tx,
+  int ty
+) {
+
+  if (tx < 0)
+    return true;
+
+  if (tx >= WORLD_W)
+    return true;
+
+  if (ty >= WORLD_H)
+    return true;
+
+  if (ty < 0)
+    return false;
+
+
+  uint8_t block =
+    world[ty][tx];
+
+
+  // Air isn't solid
+
+  if (block == AIR)
+    return false;
+
+
+  // Open door isn't solid
+
+  if (block == DOOR_OPEN)
+    return false;
+
+
+  return true;
+}
+
+
+// =====================================================
+// PLAYER COLLISION
+// =====================================================
+
+bool rectangleCollision(
+  float x,
+  float y
+) {
+
+  int left =
+    floor(
+      x / TILE_SIZE
+    );
+
+
+  int right =
+    floor(
+      (x + PLAYER_W - 1)
+      / TILE_SIZE
+    );
+
+
+  int top =
+    floor(
+      y / TILE_SIZE
+    );
+
+
+  int bottom =
+    floor(
+      (y + PLAYER_H - 1)
+      / TILE_SIZE
+    );
+
+
+  for (
+    int ty = top;
+    ty <= bottom;
+    ty++
+  ) {
+
+    for (
+      int tx = left;
+      tx <= right;
+      tx++
+    ) {
+
+      if (
+        solidBlock(
+          tx,
+          ty
+        )
+      ) {
+
+        return true;
+      }
+    }
+  }
+
+
+  return false;
+}
+
+
+// =====================================================
+// MOVE HORIZONTAL
+// =====================================================
+
+void moveHorizontal(
+  float amount
+) {
+
+  int steps =
+    ceil(
+      fabs(amount) * 2.0
+    );
+
+
+  if (steps < 1)
+    steps = 1;
+
+
+  float stepAmount =
+    amount / steps;
+
+
+  for (
+    int i = 0;
+    i < steps;
+    i++
+  ) {
+
+    float nextX =
+      playerX +
+      stepAmount;
+
+
+    if (
+      !rectangleCollision(
+        nextX,
+        playerY
+      )
+    ) {
+
+      playerX =
+        nextX;
+    }
+
+    else {
+
+      velocityX = 0;
+
+      break;
+    }
+  }
+}
+
+
+// =====================================================
+// MOVE VERTICAL
+// =====================================================
+
+void moveVertical(
+  float amount
+) {
+
+  int steps =
+    ceil(
+      fabs(amount) * 2.0
+    );
+
+
+  if (steps < 1)
+    steps = 1;
+
+
+  float stepAmount =
+    amount / steps;
+
+
+  for (
+    int i = 0;
+    i < steps;
+    i++
+  ) {
+
+    float nextY =
+      playerY +
+      stepAmount;
+
+
+    if (
+      !rectangleCollision(
+        playerX,
+        nextY
+      )
+    ) {
+
+      playerY =
+        nextY;
+    }
+
+    else {
+
+      velocityY = 0;
+
+      break;
+    }
+  }
+}
+
+
+// =====================================================
+// PLAYER ON GROUND
+// =====================================================
+
+bool playerOnGround() {
+
+  return rectangleCollision(
+    playerX,
+    playerY + 1
+  );
+}
+
+
+// =====================================================
+// BLOCK TOUCHES PLAYER
+// =====================================================
+
+bool blockTouchesPlayer(
+  int tx,
+  int ty
+) {
+
+  float bx =
+    tx * TILE_SIZE;
+
+
+  float by =
+    ty * TILE_SIZE;
+
+
+  if (
+    bx < playerX + PLAYER_W &&
+    bx + TILE_SIZE > playerX &&
+    by < playerY + PLAYER_H &&
+    by + TILE_SIZE > playerY
+  ) {
+
+    return true;
+  }
+
+
+  return false;
+}
+
+
+// =====================================================
+// FORWARD TARGET
+// =====================================================
+
+bool getForwardTarget(
+  int &targetX,
+  int &targetY
+) {
+
+  int playerTileX =
+    floor(
+      (playerX + PLAYER_W / 2)
+      / TILE_SIZE
+    );
+
+
+  targetX =
+    playerTileX +
+    facing;
+
+
+  targetY =
+    floor(
+      (playerY + PLAYER_H / 2)
+      / TILE_SIZE
+    );
+
+
+  if (
+    targetX < 0 ||
+    targetX >= WORLD_W ||
+    targetY < 0 ||
+    targetY >= WORLD_H
+  ) {
+
+    return false;
+  }
+
+
+  return true;
+}
+
+
+// =====================================================
+// DOWN BREAK TARGET
+// =====================================================
+
+bool getDownTarget(
+  int &targetX,
+  int &targetY
+) {
+
+  targetX =
+    floor(
+      (playerX + PLAYER_W / 2)
+      / TILE_SIZE
+    );
+
+
+  targetY =
+    floor(
+      (playerY + PLAYER_H + 1)
+      / TILE_SIZE
+    );
+
+
+  if (
+    targetX < 0 ||
+    targetX >= WORLD_W ||
+    targetY < 0 ||
+    targetY >= WORLD_H
+  ) {
+
+    return false;
+  }
+
+
+  return true;
+}
+
+
+// =====================================================
+// RESET MINING
+// =====================================================
+
+void resetMining() {
+
+  miningMode =
+    MINE_NONE;
+
+  miningX = -1;
+  miningY = -1;
+
+  miningStart = 0;
+}
+
+
+// =====================================================
+// UPDATE MINING
+// =====================================================
+
+void updateMining(
+  bool breakPressed,
+  bool lookDownPressed
+) {
+
+  if (!breakPressed) {
+
+    resetMining();
+
+    return;
+  }
+
+
+  int targetX;
+  int targetY;
+
+  bool validTarget;
+
+  int desiredMode;
+
+
+  // -------------------------
+  // LOOK DOWN
+  // -------------------------
+
+  if (lookDownPressed) {
+
+    desiredMode =
+      MINE_DOWN;
+
+
+    validTarget =
+      getDownTarget(
+        targetX,
+        targetY
+      );
+  }
+
+
+  // -------------------------
+  // FORWARD
+  // -------------------------
+
+  else {
+
+    desiredMode =
+      MINE_FORWARD;
+
+
+    validTarget =
+      getForwardTarget(
+        targetX,
+        targetY
+      );
+  }
+
+
+  if (!validTarget) {
+
+    resetMining();
+
+    return;
+  }
+
+
+  uint8_t targetBlock =
+    world[targetY][targetX];
+
+
+  if (targetBlock == AIR) {
+
+    resetMining();
+
+    return;
+  }
+
+
+  // Starting a new block
+
+  if (
+    miningMode != desiredMode ||
+    miningX != targetX ||
+    miningY != targetY
+  ) {
+
+    miningMode =
+      desiredMode;
+
+
+    miningX =
+      targetX;
+
+
+    miningY =
+      targetY;
+
+
+    miningStart =
+      millis();
+
+
+    return;
+  }
+
+
+  uint8_t block =
+    world[miningY][miningX];
+
+
+  unsigned long needed =
+    getBreakTime(block);
+
+
+  unsigned long elapsed =
+    millis() -
+    miningStart;
+
+
+  // ===================================================
+  // FINISHED BREAKING
+  // ===================================================
+
+  if (elapsed >= needed) {
+
+    uint8_t droppedBlock =
+      block;
+
+
+    // Open door drops a normal door
+
+    if (block == DOOR_OPEN) {
+
+      droppedBlock =
+        DOOR_CLOSED;
+    }
+
+
+    // Add block to inventory
+
+    if (
+      droppedBlock >= GRASS &&
+      droppedBlock <= DOOR_CLOSED
+    ) {
+
+      inventory[droppedBlock]++;
+    }
+
+
+    // Remove block
+
+    world[miningY][miningX] =
+      AIR;
+
+
+    resetMining();
+  }
+}
+
+
+// =====================================================
+// LOOK DOWN PILLAR PLACING
+// =====================================================
+//
+// Places a block underneath player
+// AND automatically moves player on top.
+//
+// =====================================================
+
+void placePillarBlock() {
+
+  if (
+    inventory[selectedBlock] <= 0
+  ) {
+
+    return;
+  }
+
+
+  int targetX =
+    floor(
+      (playerX + PLAYER_W / 2)
+      / TILE_SIZE
+    );
+
+
+  // Current empty block occupied by player's feet
+
+  int targetY =
+    floor(
+      (playerY + PLAYER_H - 1)
+      / TILE_SIZE
+    );
+
+
+  if (
+    targetX < 0 ||
+    targetX >= WORLD_W ||
+    targetY < 0 ||
+    targetY >= WORLD_H
+  ) {
+
+    return;
+  }
+
+
+  // Must currently be air
+
+  if (
+    world[targetY][targetX] != AIR
+  ) {
+
+    return;
+  }
+
+
+  float newPlayerY =
+    targetY * TILE_SIZE -
+    PLAYER_H;
+
+
+  // Make sure there is room above
+
+  if (
+    rectangleCollision(
+      playerX,
+      newPlayerY
+    )
+  ) {
+
+    return;
+  }
+
+
+  // Place selected block
+
+  world[targetY][targetX] =
+    selectedBlock;
+
+
+  inventory[selectedBlock]--;
+
+
+  // Put player on top
+
+  playerY =
+    newPlayerY;
+
+
+  velocityY = 0;
+}
+
+
+// =====================================================
+// PLACE FORWARD
+// =====================================================
+
+void placeForward() {
+
+  int targetX;
+  int targetY;
+
+
+  if (
+    !getForwardTarget(
+      targetX,
+      targetY
+    )
+  ) {
+
+    return;
+  }
+
+
+  uint8_t targetBlock =
+    world[targetY][targetX];
+
+
+  // ===================================================
+  // OPEN DOOR
+  // ===================================================
+
+  if (
+    targetBlock ==
+    DOOR_CLOSED
+  ) {
+
+    world[targetY][targetX] =
+      DOOR_OPEN;
+
+    return;
+  }
+
+
+  // ===================================================
+  // CLOSE DOOR
+  // ===================================================
+
+  if (
+    targetBlock ==
+    DOOR_OPEN
+  ) {
+
+    if (
+      !blockTouchesPlayer(
+        targetX,
+        targetY
+      )
+    ) {
+
+      world[targetY][targetX] =
+        DOOR_CLOSED;
+    }
+
+    return;
+  }
+
+
+  // ===================================================
+  // PLACE NORMAL BLOCK
+  // ===================================================
+
+  if (
+    inventory[selectedBlock] <= 0
+  ) {
+
+    return;
+  }
+
+
+  if (
+    world[targetY][targetX] != AIR
+  ) {
+
+    return;
+  }
+
+
+  if (
+    blockTouchesPlayer(
+      targetX,
+      targetY
+    )
+  ) {
+
+    return;
+  }
+
+
+  world[targetY][targetX] =
+    selectedBlock;
+
+
+  inventory[selectedBlock]--;
+}
+
+
+// =====================================================
+// PLACE
+// =====================================================
+
+void placeBlock(
+  bool lookDownPressed
+) {
+
+  if (lookDownPressed) {
+
+    placePillarBlock();
+  }
+
+  else {
+
+    placeForward();
+  }
+}
+
+
+// =====================================================
+// NEXT INVENTORY ITEM
+// =====================================================
+
+void nextInventoryBlock() {
+
+  selectedBlock++;
+
+
+  if (
+    selectedBlock >
+    DOOR_CLOSED
+  ) {
+
+    selectedBlock =
+      GRASS;
+  }
+}
+
+
+// =====================================================
+// PREVIOUS INVENTORY ITEM
+// =====================================================
+
+uint8_t previousInventoryBlock(
+  uint8_t block
+) {
+
+  if (block == GRASS) {
+
+    return DOOR_CLOSED;
+  }
+
+
+  return block - 1;
+}
+
+
+// =====================================================
+// NEXT INVENTORY ITEM FOR HOTBAR
+// =====================================================
+
+uint8_t nextInventoryBlockID(
+  uint8_t block
+) {
+
+  if (block == DOOR_CLOSED) {
+
+    return GRASS;
+  }
+
+
+  return block + 1;
+}
+
+
+// =====================================================
+// INVENTORY SHORT NAME
+// =====================================================
+
+const char* itemName(
+  uint8_t block
+) {
+
+  if (block == GRASS)
+    return "G";
+
+  if (block == DIRT)
+    return "D";
+
+  if (block == STONE)
+    return "S";
+
+  if (block == COAL_ORE)
+    return "C";
+
+  if (block == IRON_ORE)
+    return "I";
+
+  if (block == GOLD_ORE)
+    return "Au";
+
+  if (block == DIAMOND_ORE)
+    return "Di";
+
+  if (block == DOOR_CLOSED)
+    return "Dr";
+
+  return "?";
+}
+
+
+// =====================================================
+// DRAW BLOCK
+// =====================================================
+
+void drawBlock(
+  uint8_t type,
+  int x,
+  int y
+) {
+
+  if (type == AIR) {
+
+    return;
+  }
+
+
+  // ===================================================
+  // GRASS
+  // ===================================================
+
+  if (type == GRASS) {
+
+    display.drawRect(
+      x, y,
+      8, 8,
+      SSD1306_WHITE
+    );
+
+
+    display.fillRect(
+      x, y,
+      8, 2,
+      SSD1306_WHITE
+    );
+
+
+    display.drawPixel(
+      x + 2,
+      y + 4,
+      SSD1306_WHITE
+    );
+
+
+    display.drawPixel(
+      x + 5,
+      y + 6,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // DIRT
+  // ===================================================
+
+  else if (type == DIRT) {
+
+    display.drawRect(
+      x, y,
+      8, 8,
+      SSD1306_WHITE
+    );
+
+
+    display.drawPixel(
+      x + 2,
+      y + 2,
+      SSD1306_WHITE
+    );
+
+
+    display.drawPixel(
+      x + 5,
+      y + 4,
+      SSD1306_WHITE
+    );
+
+
+    display.drawPixel(
+      x + 3,
+      y + 6,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // STONE
+  // ===================================================
+
+  else if (type == STONE) {
+
+    display.drawRect(
+      x, y,
+      8, 8,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 1, y + 2,
+      x + 4, y + 1,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 3, y + 5,
+      x + 6, y + 3,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // COAL ORE
+  // ===================================================
+
+  else if (type == COAL_ORE) {
+
+    display.drawRect(
+      x, y,
+      8, 8,
+      SSD1306_WHITE
+    );
+
+
+    display.fillRect(
+      x + 1,
+      y + 1,
+      2, 2,
+      SSD1306_WHITE
+    );
+
+
+    display.fillRect(
+      x + 5,
+      y + 4,
+      2, 2,
+      SSD1306_WHITE
+    );
+
+
+    display.drawPixel(
+      x + 3,
+      y + 6,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // IRON ORE
+  // ===================================================
+
+  else if (type == IRON_ORE) {
+
+    display.drawRect(
+      x, y,
+      8, 8,
+      SSD1306_WHITE
+    );
+
+
+    display.drawCircle(
+      x + 2,
+      y + 2,
+      1,
+      SSD1306_WHITE
+    );
+
+
+    display.drawCircle(
+      x + 5,
+      y + 5,
+      1,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // GOLD ORE
+  // ===================================================
+
+  else if (type == GOLD_ORE) {
+
+    display.drawRect(
+      x, y,
+      8, 8,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 1,
+      y + 1,
+      x + 3,
+      y + 3,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 6,
+      y + 2,
+      x + 4,
+      y + 4,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 2,
+      y + 6,
+      x + 5,
+      y + 6,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // DIAMOND ORE
+  // ===================================================
+
+  else if (type == DIAMOND_ORE) {
+
+    display.drawRect(
+      x, y,
+      8, 8,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 3,
+      y + 1,
+      x + 5,
+      y + 3,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 5,
+      y + 3,
+      x + 3,
+      y + 6,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 3,
+      y + 6,
+      x + 1,
+      y + 3,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 1,
+      y + 3,
+      x + 3,
+      y + 1,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // CLOSED DOOR
+  // ===================================================
+
+  else if (
+    type == DOOR_CLOSED
+  ) {
+
+    display.drawRect(
+      x + 1,
+      y,
+      6,
+      8,
+      SSD1306_WHITE
+    );
+
+
+    display.drawPixel(
+      x + 5,
+      y + 4,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 2,
+      y + 2,
+      x + 5,
+      y + 2,
+      SSD1306_WHITE
+    );
+  }
+
+
+  // ===================================================
+  // OPEN DOOR
+  // ===================================================
+
+  else if (
+    type == DOOR_OPEN
+  ) {
+
+    display.drawLine(
+      x + 1,
+      y,
+      x + 1,
+      y + 7,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 1,
+      y,
+      x + 6,
+      y + 2,
+      SSD1306_WHITE
+    );
+
+
+    display.drawLine(
+      x + 6,
+      y + 2,
+      x + 6,
+      y + 7,
+      SSD1306_WHITE
+    );
+  }
+}
+
+
+// =====================================================
+// DRAW PLAYER
+// =====================================================
+
+void drawPlayer() {
+
+  int sx =
+    (int)playerX -
+    cameraX;
+
+
+  int sy =
+    (int)playerY -
+    cameraY;
+
+
+  display.fillRect(
+    sx,
+    sy,
+    PLAYER_W,
+    PLAYER_H,
+    SSD1306_WHITE
+  );
+
+
+  // Eye
+
+  if (facing > 0) {
+
+    display.drawPixel(
+      sx + 4,
+      sy + 2,
+      SSD1306_BLACK
+    );
+  }
+
+  else {
+
+    display.drawPixel(
+      sx + 1,
+      sy + 2,
+      SSD1306_BLACK
+    );
+  }
+}
+
+
+// =====================================================
+// DRAW MINING CRACKS
+// =====================================================
+
+void drawMining() {
+
+  if (
+    miningMode ==
+    MINE_NONE
+  ) {
+
+    return;
+  }
+
+
+  if (
+    miningX < 0 ||
+    miningY < 0
+  ) {
+
+    return;
+  }
+
+
+  uint8_t block =
+    world[miningY][miningX];
+
+
+  if (block == AIR) {
+
+    return;
+  }
+
+
+  int sx =
+    miningX * TILE_SIZE -
+    cameraX;
+
+
+  int sy =
+    miningY * TILE_SIZE -
+    cameraY;
+
+
+  unsigned long required =
+    getBreakTime(block);
+
+
+  unsigned long elapsed =
+    millis() -
+    miningStart;
+
+
+  float progress =
+    (float)elapsed /
+    (float)required;
+
+
+  if (progress > 1.0) {
+
+    progress = 1.0;
+  }
+
+
+  display.drawRect(
+    sx - 1,
+    sy - 1,
+    10,
+    10,
+    SSD1306_WHITE
+  );
+
+
+  if (progress > 0.25) {
+
+    display.drawLine(
+      sx + 3,
+      sy + 1,
+      sx + 4,
+      sy + 4,
+      SSD1306_WHITE
+    );
+  }
+
+
+  if (progress > 0.50) {
+
+    display.drawLine(
+      sx + 4,
+      sy + 4,
+      sx + 1,
+      sy + 6,
+      SSD1306_WHITE
+    );
+  }
+
+
+  if (progress > 0.75) {
+
+    display.drawLine(
+      sx + 4,
+      sy + 4,
+      sx + 7,
+      sy + 6,
+      SSD1306_WHITE
+    );
+  }
+}
+
+
+// =====================================================
+// MINING BAR
+// =====================================================
+
+void drawMiningBar() {
+
+  if (
+    miningMode ==
+    MINE_NONE
+  ) {
+
+    return;
+  }
+
+
+  uint8_t block =
+    world[miningY][miningX];
+
+
+  if (block == AIR) {
+
+    return;
+  }
+
+
+  unsigned long needed =
+    getBreakTime(block);
+
+
+  unsigned long elapsed =
+    millis() -
+    miningStart;
+
+
+  if (elapsed > needed) {
+
+    elapsed = needed;
+  }
+
+
+  int barWidth =
+    (elapsed * 48UL) /
+    needed;
+
+
+  display.fillRect(
+    76,
+    1,
+    51,
+    6,
+    SSD1306_BLACK
+  );
+
+
+  display.drawRect(
+    76,
+    1,
+    51,
+    6,
+    SSD1306_WHITE
+  );
+
+
+  if (barWidth > 0) {
+
+    display.fillRect(
+      77,
+      2,
+      barWidth,
+      4,
+      SSD1306_WHITE
+    );
+  }
+}
+
+
+// =====================================================
+// DRAW HOTBAR SLOT
+// =====================================================
+
+void drawHotbarSlot(
+  int x,
+  uint8_t item,
+  bool selected
+) {
+
+  if (selected) {
+
+    display.drawRect(
+      x,
+      54,
+      40,
+      10,
+      SSD1306_WHITE
+    );
+  }
+
+
+  display.setCursor(
+    x + 3,
+    56
+  );
+
+
+  display.print(
+    itemName(item)
+  );
+
+
+  display.print(":");
+
+
+  display.print(
+    inventory[item]
+  );
+}
+
+
+// =====================================================
+// DRAW HOTBAR
+// =====================================================
+//
+// Shows:
+//
+// previous | SELECTED | next
+//
+// =====================================================
+
+void drawHotbar() {
+
+  display.fillRect(
+    0,
+    54,
+    SCREEN_WIDTH,
+    10,
+    SSD1306_BLACK
+  );
+
+
+  uint8_t previous =
+    previousInventoryBlock(
+      selectedBlock
+    );
+
+
+  uint8_t next =
+    nextInventoryBlockID(
+      selectedBlock
+    );
+
+
+  drawHotbarSlot(
+    1,
+    previous,
+    false
+  );
+
+
+  drawHotbarSlot(
+    43,
+    selectedBlock,
+    true
+  );
+
+
+  drawHotbarSlot(
+    85,
+    next,
+    false
+  );
+}
+
+
+// =====================================================
+// DRAW WORLD
+// =====================================================
+
+void drawGame() {
+
+  display.clearDisplay();
+
+
+  int startTileX =
+    cameraX /
+    TILE_SIZE;
+
+
+  int endTileX =
+    startTileX +
+    SCREEN_WIDTH /
+    TILE_SIZE +
+    2;
+
+
+  if (
+    endTileX >
+    WORLD_W
+  ) {
+
+    endTileX =
+      WORLD_W;
+  }
+
+
+  for (
+    int y = 0;
+    y < WORLD_H;
+    y++
+  ) {
+
+    for (
+      int x = startTileX;
+      x < endTileX;
+      x++
+    ) {
+
+      if (
+        world[y][x] ==
+        AIR
+      ) {
+
+        continue;
+      }
+
+
+      int sx =
+        x * TILE_SIZE -
+        cameraX;
+
+
+      int sy =
+        y * TILE_SIZE -
+        cameraY;
+
+
+      if (
+        sx > -TILE_SIZE &&
+        sx < SCREEN_WIDTH &&
+        sy > -TILE_SIZE &&
+        sy < SCREEN_HEIGHT
+      ) {
+
+        drawBlock(
+          world[y][x],
+          sx,
+          sy
+        );
+      }
+    }
+  }
+
+
+  drawPlayer();
+
+  drawMining();
+
+  drawMiningBar();
+
+  drawHotbar();
+
+
+  display.display();
+}
+
+
+// =====================================================
+// UPDATE CAMERA
+// =====================================================
+
+void updateCamera() {
+
+  cameraX =
+    (int)playerX +
+    PLAYER_W / 2 -
+    SCREEN_WIDTH / 2;
+
+
+  int maxCamera =
+    WORLD_W *
+    TILE_SIZE -
+    SCREEN_WIDTH;
+
+
+  if (cameraX < 0) {
+
+    cameraX = 0;
+  }
+
+
+  if (
+    cameraX >
+    maxCamera
+  ) {
+
+    cameraX =
+      maxCamera;
+  }
+
+
+  // DO NOT CHANGE cameraY
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup() {
+
+  // Buttons to GND
+
+  pinMode(
+    BTN_LEFT,
+    INPUT_PULLUP
+  );
+
+
+  pinMode(
+    BTN_RIGHT,
+    INPUT_PULLUP
+  );
+
+
+  pinMode(
+    BTN_JUMP,
+    INPUT_PULLUP
+  );
+
+
+  pinMode(
+    BTN_BREAK,
+    INPUT_PULLUP
+  );
+
+
+  pinMode(
+    BTN_PLACE,
+    INPUT_PULLUP
+  );
+
+
+  pinMode(
+    BTN_LOOK_DOWN,
+    INPUT_PULLUP
+  );
+
+
+  // D0 inventory button -> 3.3V
+
+  pinMode(
+    BTN_INVENTORY,
+    INPUT_PULLDOWN_16
+  );
+
+
+  // OLED
+
+  Wire.begin(
+    OLED_SDA,
+    OLED_SCL
+  );
+
+
+  if (
+    !display.begin(
+      SSD1306_SWITCHCAPVCC,
+      OLED_ADDRESS
+    )
+  ) {
+
+    while (true) {
+
+      delay(100);
+    }
+  }
+
+
+  display.clearDisplay();
+
+
+  display.setTextColor(
+    SSD1306_WHITE
+  );
+
+
+  display.setTextSize(1);
+
+
+  display.setCursor(
+    17,
+    16
+  );
+
+
+  display.println(
+    "MINECRAFT MICRO"
+  );
+
+
+  display.setCursor(
+    22,
+    30
+  );
+
+
+  display.println(
+    "ORES + DOORS"
+  );
+
+
+  display.setCursor(
+    25,
+    44
+  );
+
+
+  display.println(
+    "ESP8266"
+  );
+
+
+  display.display();
+
+
+  delay(1500);
+
+
+  randomSeed(
+    analogRead(A0)
+  );
+
+
+  generateWorld();
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop() {
+
+  // ===================================================
+  // READ BUTTONS
+  // ===================================================
+
+  bool leftPressed =
+    digitalRead(
+      BTN_LEFT
+    ) == LOW;
+
+
+  bool rightPressed =
+    digitalRead(
+      BTN_RIGHT
+    ) == LOW;
+
+
+  bool jumpPressed =
+    digitalRead(
+      BTN_JUMP
+    ) == LOW;
+
+
+  bool breakPressed =
+    digitalRead(
+      BTN_BREAK
+    ) == LOW;
+
+
+  bool placePressed =
+    digitalRead(
+      BTN_PLACE
+    ) == LOW;
+
+
+  bool lookDownPressed =
+    digitalRead(
+      BTN_LOOK_DOWN
+    ) == LOW;
+
+
+  bool inventoryPressed =
+    digitalRead(
+      BTN_INVENTORY
+    ) == HIGH;
+
+
+  // ===================================================
+  // WALK
+  // ===================================================
+
+  velocityX = 0;
+
+
+  if (
+    leftPressed &&
+    !rightPressed
+  ) {
+
+    velocityX =
+      -1.4;
+
+    facing =
+      -1;
+  }
+
+
+  if (
+    rightPressed &&
+    !leftPressed
+  ) {
+
+    velocityX =
+      1.4;
+
+    facing =
+      1;
+  }
+
+
+  // ===================================================
+  // JUMP
+  // ===================================================
+
+  if (
+    jumpPressed &&
+    !prevJump &&
+    playerOnGround()
+  ) {
+
+    velocityY =
+      -3.8;
+  }
+
+
+  // ===================================================
+  // MINING
+  // ===================================================
+
+  updateMining(
+    breakPressed,
+    lookDownPressed
+  );
+
+
+  // ===================================================
+  // PLACE
+  // ===================================================
+
+  if (
+    placePressed &&
+    !prevPlace &&
+    millis() -
+    lastPlaceTime >
+    120
+  ) {
+
+    placeBlock(
+      lookDownPressed
+    );
+
+
+    lastPlaceTime =
+      millis();
+  }
+
+
+  // ===================================================
+  // INVENTORY
+  // ===================================================
+
+  if (
+    inventoryPressed &&
+    !prevInventory &&
+    millis() -
+    lastInventoryTime >
+    150
+  ) {
+
+    nextInventoryBlock();
+
+
+    lastInventoryTime =
+      millis();
+  }
+
+
+  // ===================================================
+  // GRAVITY
+  // ===================================================
+
+  velocityY +=
+    0.28;
+
+
+  if (
+    velocityY >
+    3.5
+  ) {
+
+    velocityY =
+      3.5;
+  }
+
+
+  // ===================================================
+  // MOVE PLAYER
+  // ===================================================
+
+  moveHorizontal(
+    velocityX
+  );
+
+
+  moveVertical(
+    velocityY
+  );
+
+
+  // ===================================================
+  // CAMERA
+  // ===================================================
+
+  updateCamera();
+
+
+  // ===================================================
+  // DRAW
+  // ===================================================
+
+  drawGame();
+
+
+  // ===================================================
+  // REMEMBER BUTTONS
+  // ===================================================
+
+  prevJump =
+    jumpPressed;
+
+
+  prevPlace =
+    placePressed;
+
+
+  prevInventory =
+    inventoryPressed;
+
+
+  delay(20);
+}
